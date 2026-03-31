@@ -1,0 +1,3 @@
+[submodule "Plugins/UE-EasyKafka"]
+	path = Plugins/UE-EasyKafka
+	url = https://github.com/MaciasMucias/UE-EasyKafka.git
