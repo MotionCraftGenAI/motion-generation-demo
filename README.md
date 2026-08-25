@@ -14,7 +14,7 @@ This is an **early MVP**. It demonstrates one thing: a skeleton character genera
 
 ## See it in action
 
-https://github.com/user-attachments/assets/c1aa82f1-53d5-417d-9d5e-8978b8f5e95e
+https://github.com/user-attachments/assets/14fa36e3-4c6c-4268-90bc-763b6f722b40
 
 ---
 
