@@ -1,5 +1,4 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-// Modifications Copyright © 2026 MotionCraftGenAI. All rights reserved.
 
 #include "MotionPrototypingCharacter.h"
 #include "Engine/LocalPlayer.h"
@@ -16,25 +15,17 @@
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
-//////////////////////////////////////////////////////////////////////////
-// AMotionPrototypingCharacter
-
 AMotionPrototypingCharacter::AMotionPrototypingCharacter()
 {
-	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
 
-	// Don't rotate when the controller rotates. Let that just affect the camera.
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
 
-	// Configure character movement
-	GetCharacterMovement()->bOrientRotationToMovement = true; // Character moves in the direction of input...	
-	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f); // ...at this rotation rate
+	GetCharacterMovement()->bOrientRotationToMovement = true;
+	GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f);
 
-	// Note: For faster iteration times these variables, and many more, can be tweaked in the Character Blueprint
-	// instead of recompiling to adjust them
 	GetCharacterMovement()->JumpZVelocity = 700.f;
 	GetCharacterMovement()->AirControl = 0.35f;
 	GetCharacterMovement()->MaxWalkSpeed = 500.f;
@@ -42,94 +33,44 @@ AMotionPrototypingCharacter::AMotionPrototypingCharacter()
 	GetCharacterMovement()->BrakingDecelerationWalking = 2000.f;
 	GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
 
-	// Create a camera boom (pulls in towards the player if there is a collision)
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
-	CameraBoom->TargetArmLength = 400.0f; // The camera follows at this distance behind the character	
-	CameraBoom->bUsePawnControlRotation = true; // Rotate the arm based on the controller
+	CameraBoom->TargetArmLength = 400.0f;
+	CameraBoom->bUsePawnControlRotation = true;
 
-	// Create a follow camera
+	CameraBoom->bEnableCameraLag = true;
+	CameraBoom->bEnableCameraRotationLag = true;
+	CameraBoom->CameraLagSpeed = 12.0f;
+	CameraBoom->CameraRotationLagSpeed = 12.0f;
+
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
-	// Attach the camera to the end of the boom and let the boom adjust to match the controller orientation
-	FollowCamera->bUsePawnControlRotation = false; // Camera does not rotate relative to arm
+	FollowCamera->bUsePawnControlRotation = false;
 
-	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character)
-	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
-
-	PhysicalAnimationComponent = CreateDefaultSubobject<UPhysicalAnimation>(TEXT("PhysicalAnimationComponent"));
+	ParityAnimationComponent = CreateDefaultSubobject<UPhysicalAnimation>(TEXT("ParityAnimationComponent"));
+	PrimaryActorTick.AddPrerequisite(ParityAnimationComponent, ParityAnimationComponent->PrimaryComponentTick);
 }
 
 void AMotionPrototypingCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	UE_LOG(LogTemplateCharacter, Log, TEXT("PhysicalAnimationComponent from constructor: %p"),
-	       PhysicalAnimationComponent);
-
-	// Find the actual component that was created (constructor pointer may be wrong due to Blueprint/CDO issues)
-	TArray<UPhysicalAnimation*> FoundComponents;
-	GetComponents<UPhysicalAnimation>(FoundComponents);
-	UE_LOG(LogTemplateCharacter, Log, TEXT("Found %d PhysicalAnimation components on this actor"),
-	       FoundComponents.Num());
-	for (UPhysicalAnimation* Comp : FoundComponents)
+	if (ParityAnimationComponent == nullptr)
 	{
-		UE_LOG(LogTemplateCharacter, Log, TEXT("  - Component: %p"), Comp);
-		PhysicalAnimationComponent = Comp; // Use the last one found (or you could add logic to pick the right one)
+		ParityAnimationComponent = FindComponentByClass<UPhysicalAnimation>();
+		UE_LOG(LogTemplateCharacter, Warning,
+			TEXT("ParityAnimationComponent was None; re-resolved from the actor: %s"),
+			ParityAnimationComponent ? TEXT("found") : TEXT("still missing"));
 	}
 }
-
-void AMotionPrototypingCharacter::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-
-	if (PhysicalAnimationComponent)
-	{
-		UE_LOG(LogTemplateCharacter, Log, TEXT("Delta R2: %s (instance: %p)"),
-		       *PhysicalAnimationComponent->GetRootPositionDelta().ToString(), PhysicalAnimationComponent);
-		float RootDeltaScale = 98.69f / 0.88f;
-		const FVector DeltaMovement = PhysicalAnimationComponent->GetRootPositionDelta() * RootDeltaScale;
-		UE_LOG(LogTemplateCharacter, Log, TEXT("%f, %f, %f, %f"), DeltaMovement.X, DeltaMovement.Y, DeltaMovement.Z,
-		       RootDeltaScale);
-		if (!DeltaMovement.IsNearlyZero())
-		{
-			FVector UpdatedDelta = FVector(DeltaMovement.Y + GetActorLocation().X,
-			                               DeltaMovement.X + GetActorLocation().Y,
-			                               GetActorLocation().Z);
-
-			SetActorLocation(UpdatedDelta);
-
-			const FQuat RootRotation = PhysicalAnimationComponent->GetRootRotation();
-			const FRotator TargetRotation = RootRotation.Rotator();
-
-			// Only use Yaw (ignore pitch and roll for character rotation)
-			const FRotator CurrentRotation = GetActorRotation();
-			UE_LOG(LogTemplateCharacter, Log, TEXT("%s; %s"), *CurrentRotation.Quaternion().ToString(),
-			       *RootRotation.ToString());
-			const FRotator NewRotation = FRotator(
-				TargetRotation.Pitch, // Keep current pitch
-				TargetRotation.Yaw, // Use AI's yaw
-				TargetRotation.Roll // Keep current roll
-			);
-
-			SetActorRotation(NewRotation);
-		}
-	}
-}
-
-
-//////////////////////////////////////////////////////////////////////////
-// Input
 
 void AMotionPrototypingCharacter::NotifyControllerChanged()
 {
 	Super::NotifyControllerChanged();
 
-	// Add Input Mapping Context
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
-		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<
-			UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
+		if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PlayerController->GetLocalPlayer()))
 		{
 			Subsystem->AddMappingContext(DefaultMappingContext, 0);
 		}
@@ -138,62 +79,52 @@ void AMotionPrototypingCharacter::NotifyControllerChanged()
 
 void AMotionPrototypingCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
-	// Set up action bindings
-	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent))
-	{
-		// Jumping
+	if (UEnhancedInputComponent* EnhancedInputComponent = Cast<UEnhancedInputComponent>(PlayerInputComponent)) {
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 
-		// Moving
-		EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this,
-		                                   &AMotionPrototypingCharacter::Move);
+		if (MoveAction)
+		{
+			EnhancedInputComponent->BindAction(MoveAction, ETriggerEvent::Triggered, this,
+				&AMotionPrototypingCharacter::Move);
+		}
+		else
+		{
+			UE_LOG(LogTemplateCharacter, Warning,
+				TEXT("MoveAction is not set on %s; the heading command cannot be steered"),
+				*GetNameSafe(this));
+		}
 
-		// Looking
-		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this,
-		                                   &AMotionPrototypingCharacter::Look);
+		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AMotionPrototypingCharacter::Look);
 	}
 	else
 	{
-		UE_LOG(LogTemplateCharacter, Error,
-		       TEXT(
-			       "'%s' Failed to find an Enhanced Input component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."
-		       ), *GetNameSafe(this));
+		UE_LOG(LogTemplateCharacter, Error, TEXT("'%s' Failed to find an Enhanced Input component! This template is built to use the Enhanced Input system. If you intend to use the legacy system, then you will need to update this C++ file."), *GetNameSafe(this));
 	}
 }
 
 void AMotionPrototypingCharacter::Move(const FInputActionValue& Value)
 {
-	// 1. Validate the component exists
-	if (PhysicalAnimationComponent == nullptr)
+	// Camera-relative input steers the heading the model walks in; physics moves the pawn.
+	const FVector2D Input = Value.Get<FVector2D>();
+	if (Input.IsNearlyZero() || Controller == nullptr || ParityAnimationComponent == nullptr)
 	{
-		UE_LOG(LogTemplateCharacter, Error, TEXT("PhysicalAnimationComponent is NULL in Move!"));
 		return;
 	}
 
-	if (Controller != nullptr)
-	{
-		const FVector2D InputVector = Value.Get<FVector2D>();
-
-		const FRotator Rotation = Controller->GetControlRotation();
-		const FRotator YawRotation(0, Rotation.Yaw, 0);
-
-		const FVector ForwardDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
-
-		const FVector WorldDirection = (ForwardDirection * InputVector.Y) + (RightDirection * InputVector.X);
-		PhysicalAnimationComponent->SendHeadingVector2D(FVector2D(WorldDirection.Y, WorldDirection.X));
-	}
+	const FRotator YawOnly(0.0, Controller->GetControlRotation().Yaw, 0.0);
+	const FVector Forward = FRotationMatrix(YawOnly).GetUnitAxis(EAxis::X);
+	const FVector Right = FRotationMatrix(YawOnly).GetUnitAxis(EAxis::Y);
+	ParityAnimationComponent->SetDirectHeadingFromWorldDirection(
+		Forward * Input.Y + Right * Input.X);
 }
 
 void AMotionPrototypingCharacter::Look(const FInputActionValue& Value)
 {
-	// input is a Vector2D
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		// add yaw and pitch input to controller
 		AddControllerYawInput(LookAxisVector.X);
 		AddControllerPitchInput(LookAxisVector.Y);
 	}
