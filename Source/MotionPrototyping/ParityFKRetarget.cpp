@@ -1,7 +1,6 @@
 #include "ParityFKRetarget.h"
 
 #include "Chaos/ChaosEngineInterface.h"
-#include "Chaos/PBDJointConstraintUtilities.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 #include "PhysicsEngine/BodyInstance.h"
@@ -123,81 +122,23 @@ namespace
 	};
 
 	// UE torque is kg*cm^2/s^2, the training rig's kg*m^2/s^2.
-	float GDriveGainScale = 1.0e4f;
-	FAutoConsoleVariableRef CVarDriveGainScale(
-		TEXT("p.Parity.DriveGainScale"),
-		GDriveGainScale,
-		TEXT("Multiplier from MJCF N*m/rad onto UE angular drive units."),
-		ECVF_Default);
-
-	int32 GInjectMjcfGains = 1;
-	FAutoConsoleVariableRef CVarInjectMjcfGains(
-		TEXT("p.Parity.InjectMjcfGains"),
-		GInjectMjcfGains,
-		TEXT("1 to overwrite authored angular drive gains with the MJCF values."),
-		ECVF_Default);
-
-	int32 GFixConstraintFrames = 1;
-	FAutoConsoleVariableRef CVarFixConstraintFrames(
-		TEXT("p.Parity.FixConstraintFrames"),
-		GFixConstraintFrames,
-		TEXT("1 to move each constraint's Frame2 onto the reference-skeleton bone offset."));
-
-	int32 GKneeLimits = 1;
-	FAutoConsoleVariableRef CVarKneeLimits(
-		TEXT("p.Parity.KneeLimits"),
-		GKneeLimits,
-		TEXT("Enforce the MJCF knee range (0..160 deg) on the UE calf constraints."));
-
-	int32 GAnkleLimits = 1;
-	FAutoConsoleVariableRef CVarAnkleLimits(
-		TEXT("p.Parity.AnkleLimits"),
-		GAnkleLimits,
-		TEXT("Enforce the MJCF ankle ranges: 1 for the twist axis only (ankle_y, the one "
-		     "that maps exactly), 2 for all three."));
+	constexpr double DriveGainScale = 1.0e4;
 
 	struct FMjcfRangeLimit
 	{
 		const TCHAR* Bone;
-		const int32* Enable;
 		float HalfTwist;
-		float HalfSwing1;
-		float HalfSwing2;
 		float CX, CY, CZ, CW;
 	};
 
-	// Knee and ankle ranges from training, expressed in UE's twist/swing axes. CX..CW re-centre
-	// the limit frame on the model's zero pose, since UE limits are symmetric about the frame.
+	// Knee and ankle twist ranges from training. CX..CW re-centre the limit frame on the model's
+	// zero pose, since UE limits are symmetric about the frame.
 	const FMjcfRangeLimit MjcfRangeLimits[] = {
-		{TEXT("calf_l"), &GKneeLimits,  80.000f, -1.0f,   -1.0f,
-		 +0.130496f, +0.000001f, +0.000003f, +0.991449f},
-		{TEXT("calf_r"), &GKneeLimits,  80.000f, -1.0f,   -1.0f,
-		 +0.126458f, -0.060265f, +0.083746f, +0.986592f},
-		{TEXT("foot_l"), &GAnkleLimits, 55.000f, 35.624f, 26.684f,
-		 -0.236207f, -0.025789f, +0.007599f, +0.971331f},
-		{TEXT("foot_r"), &GAnkleLimits, 55.000f, 35.624f, 26.684f,
-		 -0.236208f, +0.025789f, -0.007599f, +0.971331f},
+		{TEXT("calf_l"), 80.000f, +0.130496f, +0.000001f, +0.000003f, +0.991449f},
+		{TEXT("calf_r"), 80.000f, +0.126458f, -0.060265f, +0.083746f, +0.986592f},
+		{TEXT("foot_l"), 55.000f, -0.236207f, -0.025789f, +0.007599f, +0.971331f},
+		{TEXT("foot_r"), 55.000f, -0.236208f, +0.025789f, -0.007599f, +0.971331f},
 	};
-
-	int32 GDriveNeck = 1;
-	FAutoConsoleVariableRef CVarDriveNeck(
-		TEXT("p.Parity.DriveNeck"),
-		GDriveNeck,
-		TEXT("1 to drive the head from neck_x/y/z, 0 to weld it as before."));
-
-	int32 GObsRootExact = 0;
-	FAutoConsoleVariableRef CVarObsRootExact(
-		TEXT("p.Parity.ObsRootExact"),
-		GObsRootExact,
-		TEXT("1 to report the pelvis with the exact measured convention, 0 the snapped one."));
-
-	int32 GClavicleAnchorBind = 1;
-	FAutoConsoleVariableRef CVarClavicleAnchorBind(
-		TEXT("p.Parity.ClavicleAnchorBind"),
-		GClavicleAnchorBind,
-		TEXT("1 to anchor the clavicle weld offset against the torso's bind "
-		     "rotation, 0 for the old neutral-target anchor."),
-		ECVF_Default);
 
 	// Joint stiffness, damping and armature of the training rig.
 	const FMjcfGain MjcfGains[] = {
@@ -214,43 +155,6 @@ namespace
 		{TEXT("calf_l"), 500.0, 50.0, 0.02},
 		{TEXT("foot_l"), 400.0, 40.0, 0.01}
 	};
-
-	int32 GDriveMode = 0;
-	FAutoConsoleVariableRef CVarDriveMode(
-		TEXT("p.Parity.DriveMode"),
-		GDriveMode,
-		TEXT("0 = SLERP drive (one rotation-vector error), 1 = TwistAndSwing (per-axis)."));
-
-	// Torque mode, not acceleration: the model's joints differ in inertia per axis.
-	int32 GTorqueMode = 1;
-	FAutoConsoleVariableRef CVarTorqueMode(
-		TEXT("p.Parity.TorqueMode"),
-		GTorqueMode,
-		TEXT("1 to drive in torque units (bAccelerationMode off), which is the only "
-		     "mode that can reproduce a joint whose axes differ in inertia."),
-		ECVF_Default);
-
-	int32 GEmulateArmature = 1;
-	FAutoConsoleVariableRef CVarEmulateArmature(
-		TEXT("p.Parity.EmulateArmature"),
-		GEmulateArmature,
-		TEXT("1 to add the MJCF's armature to each driven body's inertia tensor, "
-		     "per axis, so UE's effective joint inertia matches Isaac's."),
-		ECVF_Default);
-
-	bool FindMjcfGain(const TCHAR* Bone, double& OutStiffness, double& OutDamping)
-	{
-		for (const FMjcfGain& Gain : MjcfGains)
-		{
-			if (FCString::Strcmp(Gain.Bone, Bone) == 0)
-			{
-				OutStiffness = Gain.StiffnessNm * GDriveGainScale;
-				OutDamping = Gain.DampingNms * GDriveGainScale;
-				return true;
-			}
-		}
-		return false;
-	}
 
 	const FMjcfGain* FindMjcfJoint(const TCHAR* Bone)
 	{
@@ -502,11 +406,6 @@ bool ParityForwardKinematics(
 	return true;
 }
 
-FVector ParityUePositionToIsaac(const FVector& UePositionCm)
-{
-	return FVector(UePositionCm.Y, UePositionCm.X, UePositionCm.Z) / 100.0;
-}
-
 FQuat ParityUeRotationToIsaac(const FQuat& UeRotation)
 {
 	return FQuat(-UeRotation.Y, -UeRotation.X, -UeRotation.Z, UeRotation.W).GetNormalized();
@@ -522,11 +421,6 @@ FVector ParityUeWorldAxialToIsaac(const FVector& UeAxial)
 	return -FVector(UeAxial.X, -UeAxial.Y, UeAxial.Z);
 }
 
-bool ParityIsNeckDriven()
-{
-	return GDriveNeck != 0;
-}
-
 FName ParityRootBoneName()
 {
 	return FName(StateSlots[0].Bone);
@@ -536,10 +430,8 @@ bool ParityApplyDriveTargets(
 	USkeletalMeshComponent* Mesh,
 	const TArray<FQuat>& RootRelative,
 	FParityRetargetCache& Cache,
-	float& OutWorstReadbackDegrees,
 	FString& OutError)
 {
-	OutWorstReadbackDegrees = 0.0f;
 	if (!Mesh || RootRelative.Num() != NumBodies)
 	{
 		OutError = TEXT("mesh missing or FK body count is not 15");
@@ -560,7 +452,6 @@ bool ParityApplyDriveTargets(
 			}
 
 			// Put the joint pivot on the skeleton's bind pose, which is what the training rig uses.
-			if (GFixConstraintFrames != 0)
 			{
 				const FTransform Child = ParityRefBoneComponentTransform(
 					Mesh, Constraint->ConstraintBone1);
@@ -571,44 +462,23 @@ bool ParityApplyDriveTargets(
 					Constraint->GetRefFrame(EConstraintFrame::Frame2).GetLocation();
 				if (!Wanted.Equals(Authored, 0.01f))
 				{
-					UE_LOG(LogParityFK, Display,
-						TEXT("[Frames] %s Frame2 (%+.3f %+.3f %+.3f) -> (%+.3f %+.3f %+.3f) cm, "
-						     "moved %.3f cm"),
-						*Bone.ToString(),
-						Authored.X, Authored.Y, Authored.Z,
-						Wanted.X, Wanted.Y, Wanted.Z,
-						(Wanted - Authored).Size());
+					UE_LOG(LogParityFK, Verbose, TEXT("[Frames] %s pivot moved %.3f cm"),
+						*Bone.ToString(), (Wanted - Authored).Size());
 					Constraint->SetRefPosition(EConstraintFrame::Frame2, Wanted);
 				}
 			}
 
 			for (const FMjcfRangeLimit& Lim : MjcfRangeLimits)
 			{
-				if (Bone != FName(Lim.Bone) || *Lim.Enable == 0)
+				if (Bone != FName(Lim.Bone))
 				{
 					continue;
 				}
-
 				const FQuat Centre(Lim.CX, Lim.CY, Lim.CZ, Lim.CW);
 				FTransform Frame1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
 				Frame1.SetRotation(
 					(Frame1.GetRotation() * Centre.Inverse()).GetNormalized());
 				Constraint->SetRefFrame(EConstraintFrame::Frame1, Frame1);
-
-				UE_LOG(LogParityFK, Display,
-					TEXT("[Limit] %s authored soft twist=%d(%.0f/%.0f) cone=%d(%.0f/%.0f) ")
-					TEXT("restitution twist=%.2f cone=%.2f contact twist=%.2f cone=%.2f"),
-					Lim.Bone,
-					Constraint->ProfileInstance.TwistLimit.bSoftConstraint ? 1 : 0,
-					Constraint->ProfileInstance.TwistLimit.Stiffness,
-					Constraint->ProfileInstance.TwistLimit.Damping,
-					Constraint->ProfileInstance.ConeLimit.bSoftConstraint ? 1 : 0,
-					Constraint->ProfileInstance.ConeLimit.Stiffness,
-					Constraint->ProfileInstance.ConeLimit.Damping,
-					Constraint->ProfileInstance.TwistLimit.Restitution,
-					Constraint->ProfileInstance.ConeLimit.Restitution,
-					Constraint->ProfileInstance.TwistLimit.ContactDistance,
-					Constraint->ProfileInstance.ConeLimit.ContactDistance);
 
 				// Hard stops, as in training; Chaos can silently ignore weak soft limits.
 				Constraint->ProfileInstance.TwistLimit.bSoftConstraint = false;
@@ -617,36 +487,8 @@ bool ParityApplyDriveTargets(
 				Constraint->ProfileInstance.ConeLimit.Restitution = 0.0f;
 				Constraint->ProfileInstance.TwistLimit.ContactDistance = 0.0f;
 				Constraint->ProfileInstance.ConeLimit.ContactDistance = 0.0f;
-
-				if (Lim.HalfTwist >= 0.0f)
-				{
-					Constraint->SetAngularTwistLimit(
-						EAngularConstraintMotion::ACM_Limited, Lim.HalfTwist);
-				}
-
-				const bool bSwings = (*Lim.Enable >= 2);
-				if (Lim.HalfSwing1 >= 0.0f && bSwings)
-				{
-					Constraint->SetAngularSwing1Limit(
-						EAngularConstraintMotion::ACM_Limited, Lim.HalfSwing1);
-				}
-				if (Lim.HalfSwing2 >= 0.0f && bSwings)
-				{
-					Constraint->SetAngularSwing2Limit(
-						EAngularConstraintMotion::ACM_Limited, Lim.HalfSwing2);
-				}
-
-				Chaos::FReal Tw = 0.0, S1 = 0.0, S2 = 0.0;
-				Chaos::FPBDJointUtilities::GetSwingTwistAngles(
-					Chaos::FRotation3::Identity, Centre, Tw, S1, S2);
-				UE_LOG(LogParityFK, Display,
-					TEXT("[Limit] %s neutral shifted by twist %+.3f swing1 %+.3f ")
-					TEXT("swing2 %+.3f deg; limits twist %.3f swing1 %.3f swing2 %.3f"),
-					Lim.Bone,
-					FMath::RadiansToDegrees((float)Tw),
-					FMath::RadiansToDegrees((float)S1),
-					FMath::RadiansToDegrees((float)S2),
-					Lim.HalfTwist, Lim.HalfSwing1, Lim.HalfSwing2);
+				Constraint->SetAngularTwistLimit(
+					EAngularConstraintMotion::ACM_Limited, Lim.HalfTwist);
 			}
 
 			const FName ChildBone = Constraint->GetChildBoneName();
@@ -670,148 +512,55 @@ bool ParityApplyDriveTargets(
 			{
 				Bind.LiveAnchorBody = 1;
 				const FDrivenJoint* Torso = FindDrivenJointByBody(1);
-				const FQuat NeutralTorsoTarget =
-					ComputeAbsoluteTarget(*Torso, FQuat::Identity);
 				const FQuat TorsoActorBind =
 					Mesh->GetSocketTransform(FName(Torso->Bone), RTS_Actor).GetRotation();
-				Bind.HeldRelativeToAnchor =
-					(GClavicleAnchorBind != 0 ? TorsoActorBind : NeutralTorsoTarget)
-						.Inverse() * Bind.ParentActorBind;
-				UE_LOG(LogParityFK, Display,
-					TEXT("[Drive] %s weld anchor on %s: held=%.4f deg, "
-					     "bind_vs_neutral=%.4f deg (anchor_bind=%d)"),
-					Joint.Bone, *ParentBone.ToString(),
-					FMath::RadiansToDegrees(
-						Bind.HeldRelativeToAnchor.GetAngle()),
-					FMath::RadiansToDegrees(
-						TorsoActorBind.AngularDistance(NeutralTorsoTarget)),
-					GClavicleAnchorBind);
+				Bind.HeldRelativeToAnchor = TorsoActorBind.Inverse() * Bind.ParentActorBind;
 			}
 			Bind.bValid = true;
 			Captured.Add(Bone, Bind);
 
-			float AuthoredSpring = 0.0f;
-			float AuthoredDamping = 0.0f;
-			float AuthoredForceLimit = 0.0f;
-			Constraint->GetAngularDriveParams(AuthoredSpring, AuthoredDamping, AuthoredForceLimit);
-
-			double MjcfSpring = 0.0;
-			double MjcfDamping = 0.0;
-			if (GInjectMjcfGains != 0 && FindMjcfGain(Joint.Bone, MjcfSpring, MjcfDamping))
+			// The training rig's gains replace the ones authored in the physics asset, in torque
+			// mode: acceleration mode would give every axis of a joint the same response despite
+			// their different inertia.
+			if (const FMjcfGain* Mjcf = FindMjcfJoint(Joint.Bone))
 			{
-				FString ArmatureReport = TEXT("armature not applied");
-				const FMjcfGain* Mjcf = FindMjcfJoint(Joint.Bone);
-				FBodyInstance* Body = Mesh->GetBodyInstance(Bone);
-				if (GEmulateArmature != 0 && Mjcf
-					&& !ApplyArmature(Body, Mjcf->ArmatureKgM2, ArmatureReport))
+				float AuthoredSpring = 0.0f;
+				float AuthoredDamping = 0.0f;
+				float AuthoredForceLimit = 0.0f;
+				Constraint->GetAngularDriveParams(AuthoredSpring, AuthoredDamping, AuthoredForceLimit);
+				const double Spring = Mjcf->StiffnessNm * DriveGainScale;
+				const double Damping = Mjcf->DampingNms * DriveGainScale;
+
+				FString ArmatureReport;
+				if (!ApplyArmature(Mesh->GetBodyInstance(Bone), Mjcf->ArmatureKgM2, ArmatureReport))
 				{
-					ArmatureReport = TEXT("armature FAILED: no inertia on the body yet");
+					UE_LOG(LogParityFK, Warning, TEXT("[Drive] %s: armature not applied"), Joint.Bone);
 				}
-
-				Constraint->ProfileInstance.AngularDrive.SetAccelerationMode(
-					GTorqueMode == 0);
-				Constraint->SetAngularDriveParams(
-					MjcfSpring, MjcfDamping, AuthoredForceLimit);
-
-				const FVector Inertia = Body ? Body->GetBodyInertiaTensor() : FVector::ZeroVector;
-				const auto Wn = [&](double I) {
-					return I > 0.0 ? FMath::Sqrt(MjcfSpring / I) : 0.0;
-				};
-
-				{
-					const FTransform F1 = Constraint->GetRefFrame(EConstraintFrame::Frame1);
-					const FTransform F2 = Constraint->GetRefFrame(EConstraintFrame::Frame2);
-					const FQuat Rel = (F2.GetRotation().Inverse() * F1.GetRotation()).GetNormalized();
-					UE_LOG(LogParityFK, Display,
-						TEXT("[Frames] %s F1 pos (%.4f, %.4f, %.4f) rot %.4f deg about ")
-						TEXT("(%.3f, %.3f, %.3f) | F2 pos (%.4f, %.4f, %.4f) rot %.4f deg about ")
-						TEXT("(%.3f, %.3f, %.3f) | F1-vs-F2 %.4f deg"),
-						Joint.Bone,
-						F1.GetLocation().X, F1.GetLocation().Y, F1.GetLocation().Z,
-						FMath::RadiansToDegrees(F1.GetRotation().GetAngle()),
-						F1.GetRotation().GetRotationAxis().X,
-						F1.GetRotation().GetRotationAxis().Y,
-						F1.GetRotation().GetRotationAxis().Z,
-						F2.GetLocation().X, F2.GetLocation().Y, F2.GetLocation().Z,
-						FMath::RadiansToDegrees(F2.GetRotation().GetAngle()),
-						F2.GetRotation().GetRotationAxis().X,
-						F2.GetRotation().GetRotationAxis().Y,
-						F2.GetRotation().GetRotationAxis().Z,
-						FMath::RadiansToDegrees(Rel.GetAngle()));
-				}
-
-				{
-					const FConstraintProfileProperties& Profile = Constraint->ProfileInstance;
-					UE_LOG(LogParityFK, Display,
-						TEXT("[Limits] %s motion twist=%d swing1=%d swing2=%d  ")
-						TEXT("limits twist=%.2f swing1=%.2f swing2=%.2f deg  ")
-						TEXT("soft twist=%d (%.0f/%.0f) cone=%d (%.0f/%.0f)  ")
-						TEXT("restitution twist=%.2f cone=%.2f  contact twist=%.2f cone=%.2f"),
-						Joint.Bone,
-						static_cast<int32>(Constraint->GetAngularTwistMotion()),
-						static_cast<int32>(Constraint->GetAngularSwing1Motion()),
-						static_cast<int32>(Constraint->GetAngularSwing2Motion()),
-						Profile.TwistLimit.TwistLimitDegrees,
-						Profile.ConeLimit.Swing1LimitDegrees,
-						Profile.ConeLimit.Swing2LimitDegrees,
-						static_cast<int32>(Profile.TwistLimit.bSoftConstraint),
-						Profile.TwistLimit.Stiffness, Profile.TwistLimit.Damping,
-						static_cast<int32>(Profile.ConeLimit.bSoftConstraint),
-						Profile.ConeLimit.Stiffness, Profile.ConeLimit.Damping,
-						Profile.TwistLimit.Restitution, Profile.ConeLimit.Restitution,
-						Profile.TwistLimit.ContactDistance, Profile.ConeLimit.ContactDistance);
-				}
-
-				// UE scales every drive gain by these (default 1.5); they must be 1.0.
-				{
-					bool bFoundK = false;
-					bool bFoundD = false;
-					const float ScaleK = ReadCVarFloat(
-						TEXT("p.Chaos.JointConstraint.AngularDriveStiffnessScale"), bFoundK);
-					const float ScaleD = ReadCVarFloat(
-						TEXT("p.Chaos.JointConstraint.AngularDriveDampingScale"), bFoundD);
-					const bool bUnity = bFoundK && bFoundD
-						&& FMath::IsNearlyEqual(ScaleK, 1.0f, 1.e-3f)
-						&& FMath::IsNearlyEqual(ScaleD, 1.0f, 1.e-3f);
-					static bool bScalesReported = false;
-					if (!bScalesReported)
-					{
-						bScalesReported = true;
-						UE_LOG(LogParityFK, Display,
-							TEXT("[ParityScales] angular drive stiffness x%.4g damping x%.4g -> %s"),
-							ScaleK, ScaleD,
-							bUnity ? TEXT("ok") : TEXT("NOT UNITY: gains reach the solver scaled"));
-					}
-				}
-
-				UE_LOG(LogParityFK, Display,
-					TEXT("[Drive] %s Kp %.0f -> %.0f, Kd %.0f -> %.0f (MJCF %.0f/%.0f "
-					     "N*m/rad x %.0f) acceleration_mode=%d force_limit=%.1f%s\n"
-					     "         %s\n"
-					     "         wn about body axes: %.1f / %.1f / %.1f rad/s"),
-					Joint.Bone, AuthoredSpring, MjcfSpring, AuthoredDamping, MjcfDamping,
-					MjcfSpring / GDriveGainScale,
-					MjcfDamping / GDriveGainScale, GDriveGainScale,
-					static_cast<int32>(
-						Constraint->ProfileInstance.AngularDrive.bAccelerationMode),
-					AuthoredForceLimit,
-					(AuthoredForceLimit <= 0.0f || AuthoredForceLimit >= UE_MAX_FLT)
-						? TEXT(" (unclamped)") : TEXT(" (CLAMPED)"),
-					*ArmatureReport,
-					Wn(Inertia.X), Wn(Inertia.Y), Wn(Inertia.Z));
-			}
-			else
-			{
-				UE_LOG(LogParityFK, Display,
-					TEXT("[Drive] %s left at authored %.1f/%.1f "
-					     "(p.Parity.InjectMjcfGains=%d); the MJCF asks for %.0f/%.0f N*m/rad"),
-					Joint.Bone, AuthoredSpring, AuthoredDamping, GInjectMjcfGains,
-					MjcfSpring > 0.0 ? MjcfSpring / GDriveGainScale : 0.0,
-					MjcfDamping > 0.0 ? MjcfDamping / GDriveGainScale : 0.0);
+				Constraint->ProfileInstance.AngularDrive.SetAccelerationMode(false);
+				Constraint->SetAngularDriveParams(Spring, Damping, AuthoredForceLimit);
+				UE_LOG(LogParityFK, Verbose, TEXT("[Drive] %s Kp %.0f Kd %.0f N*m/rad; %s"),
+					Joint.Bone, Mjcf->StiffnessNm, Mjcf->DampingNms, *ArmatureReport);
 			}
 		}
 		Cache.Constraints = MoveTemp(Captured);
 		Cache.bCaptured = true;
+
+		// UE scales every drive gain by these (default 1.5); the training gains need 1.0.
+		bool bFoundK = false;
+		bool bFoundD = false;
+		const float ScaleK = ReadCVarFloat(
+			TEXT("p.Chaos.JointConstraint.AngularDriveStiffnessScale"), bFoundK);
+		const float ScaleD = ReadCVarFloat(
+			TEXT("p.Chaos.JointConstraint.AngularDriveDampingScale"), bFoundD);
+		if (!bFoundK || !bFoundD
+			|| !FMath::IsNearlyEqual(ScaleK, 1.0f, 1.e-3f)
+			|| !FMath::IsNearlyEqual(ScaleD, 1.0f, 1.e-3f))
+		{
+			UE_LOG(LogParityFK, Warning,
+				TEXT("Joint drive gains reach the solver scaled x%.4g (stiffness) x%.4g (damping); ")
+				TEXT("set p.Chaos.JointConstraint.AngularDrive*Scale to 1.0"),
+				ScaleK, ScaleD);
+		}
 	}
 
 	for (const FDrivenJoint& Joint : DrivenJoints)
@@ -845,26 +594,10 @@ bool ParityApplyDriveTargets(
 			* (ChildTarget * Bind->ChildToConstraint);
 		ConstraintTarget.Normalize();
 
-		if (GDriveMode == 0)
-		{
-			Constraint->SetAngularDriveMode(EAngularDriveMode::SLERP);
-			Constraint->SetOrientationDriveSLERP(true);
-			Constraint->SetAngularVelocityDriveSLERP(true);
-		}
-		else
-		{
-			Constraint->SetOrientationDriveSLERP(false);
-			Constraint->SetAngularVelocityDriveSLERP(false);
-			Constraint->SetAngularDriveMode(EAngularDriveMode::TwistAndSwing);
-			Constraint->SetOrientationDriveTwistAndSwing(true, true);
-			Constraint->SetAngularVelocityDriveTwistAndSwing(true, true);
-		}
+		Constraint->SetAngularDriveMode(EAngularDriveMode::SLERP);
+		Constraint->SetOrientationDriveSLERP(true);
+		Constraint->SetAngularVelocityDriveSLERP(true);
 		Constraint->SetAngularOrientationTarget(ConstraintTarget);
-
-		const FQuat Readback = Constraint->GetAngularOrientationTarget().Quaternion();
-		OutWorstReadbackDegrees = FMath::Max(
-			OutWorstReadbackDegrees,
-			FMath::RadiansToDegrees(ConstraintTarget.AngularDistance(Readback)));
 	}
 
 	OutError.Reset();
@@ -873,38 +606,19 @@ bool ParityApplyDriveTargets(
 
 bool ParityCapturePhysicsState(
 	USkeletalMeshComponent* Mesh,
-	int64 FrameId,
-	int64 TimestampNs,
 	FParityPhysicsState& OutState,
 	FString& OutError)
 {
 	OutState = FParityPhysicsState();
-	if (!Mesh || FrameId < 0 || TimestampNs < 0)
+	if (!Mesh)
 	{
-		OutError = TEXT("mesh/frame/timestamp invalid");
+		OutError = TEXT("no skeletal mesh");
 		return false;
 	}
-
-	OutState.FrameId = FrameId;
-	OutState.TimestampNs = TimestampNs;
-	OutState.Bodies.Reserve(NumBodies);
 
 	const FTransform ActorFrame = Mesh->GetOwner()
 		? Mesh->GetOwner()->GetActorTransform()
 		: FTransform::Identity;
-
-	const FVector RootPosition = ParityUePositionToIsaac(
-		ActorFrame.InverseTransformPosition(
-			Mesh->GetBoneLocation(ParityRootBoneName())));
-	OutState.RootPositionM[0] = RootPosition.X;
-	OutState.RootPositionM[1] = RootPosition.Y;
-	OutState.RootPositionM[2] = RootPosition.Z;
-
-	const FVector RootWorld =
-		ParityUeWorldPositionToIsaac(Mesh->GetBoneLocation(ParityRootBoneName()));
-	OutState.RootWorldPositionM[0] = RootWorld.X;
-	OutState.RootWorldPositionM[1] = RootWorld.Y;
-	OutState.RootWorldPositionM[2] = RootWorld.Z;
 
 	TArray<FQuat> RootRelativeRotations;
 	RootRelativeRotations.Init(FQuat::Identity, NumBodies);
@@ -919,12 +633,7 @@ bool ParityCapturePhysicsState(
 				ApplyInverseAxisMap(RootCorrection.Inverse() * ActorPose, RootAxisMap);
 
 			// Fixed rotation between UE's pelvis bone and the model's root frame.
-			static const FQuat RootWorldConventionSnapped(
-				0.70710678f, 0.0f, 0.70710678f, 0.0f);
-			static const FQuat RootWorldConventionExact(
-				0.70642950f, -0.02885777f, 0.70659945f, 0.02935481f);
-			const FQuat& RootWorldConvention = (GObsRootExact != 0)
-				? RootWorldConventionExact : RootWorldConventionSnapped;
+			static const FQuat RootWorldConvention(0.70710678f, 0.0f, 0.70710678f, 0.0f);
 			RootRelativeRotations[BodyIndex] =
 				(RootWorldConvention * RootRelativeRotations[BodyIndex]).GetNormalized();
 		}
@@ -943,49 +652,24 @@ bool ParityCapturePhysicsState(
 		if (BodyIndex == 8) RootRelativeRotations[BodyIndex] = RootRelativeRotations[7];
 	}
 
+	OutState.BodiesWorld.Reserve(NumBodies);
 	for (int32 BodyIndex = 0; BodyIndex < NumBodies; ++BodyIndex)
 	{
 		const FName Bone(StateSlots[BodyIndex].Bone);
-		if (!Mesh->GetBodyInstance(Bone))
+		const FBodyInstance* BodyInst = Mesh->GetBodyInstance(Bone);
+		if (!BodyInst)
 		{
 			OutError = FString::Printf(TEXT("missing physics body '%s'"), *Bone.ToString());
 			return false;
 		}
-		const FVector Position = ParityUePositionToIsaac(
-			ActorFrame.InverseTransformPosition(Mesh->GetBoneLocation(Bone)));
-
-		const FVector LinearVelocity = ParityUePositionToIsaac(
-			ActorFrame.InverseTransformVectorNoScale(
-				Mesh->GetPhysicsLinearVelocity(Bone)));
-		const FVector ActorAngularVelocity = ActorFrame.InverseTransformVectorNoScale(
-			Mesh->GetPhysicsAngularVelocityInRadians(Bone));
-
-		// The axis swap is a reflection, so axial vectors also flip sign.
-		const FVector AngularVelocity = -FVector(
-			ActorAngularVelocity.Y,
-			ActorAngularVelocity.X,
-			ActorAngularVelocity.Z);
-
-		// World rows feed the observation; position is the physics body's, as in training, not
-		// the bone pivot.
-		const FBodyInstance* BodyInst = Mesh->GetBodyInstance(Bone);
-		const FVector WorldBodyLocation = BodyInst
-			? BodyInst->GetUnrealWorldTransform().GetLocation()
-			: Mesh->GetBoneLocation(Bone);
+		// Position of the physics body, as in training, not of the bone pivot.
 		SetBodyValues(
 			OutState.BodiesWorld.AddDefaulted_GetRef(),
-			ParityUeWorldPositionToIsaac(WorldBodyLocation),
+			ParityUeWorldPositionToIsaac(BodyInst->GetUnrealWorldTransform().GetLocation()),
 			ParityUeRotationToIsaac(ActorFrame.GetRotation())
 				* RootRelativeRotations[BodyIndex],
 			ParityUeWorldPositionToIsaac(Mesh->GetPhysicsLinearVelocity(Bone)),
 			ParityUeWorldAxialToIsaac(Mesh->GetPhysicsAngularVelocityInRadians(Bone)));
-
-		SetBodyValues(
-			OutState.Bodies.AddDefaulted_GetRef(),
-			Position,
-			RootRelativeRotations[BodyIndex],
-			LinearVelocity,
-			AngularVelocity);
 	}
 	OutError.Reset();
 	return true;

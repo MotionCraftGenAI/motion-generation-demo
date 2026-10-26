@@ -35,7 +35,7 @@ public:
 	FString ModelAddress = TEXT("127.0.0.1:41911");
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Motion Model", meta = (ClampMin = "1.0"))
-	float ModelTimeoutSeconds = 120.0f;
+	float ModelTimeoutSeconds = 10.0f;
 
 	// Input steers the heading the model is asked to walk in; it never moves the pawn directly.
 	UFUNCTION(BlueprintCallable, Category = "Motion Model")
@@ -43,11 +43,12 @@ public:
 
 private:
 	bool ConnectToModel();
+	void Disconnect(const FString& Reason);
 	void TickModelLoop();
 
 	void EnsureSimulationStarted();
 
-	bool CanPublishObservation() const;
+	bool CanPublishObservation(FString& OutError) const;
 	bool PublishObservation();
 
 	void TickHold();
@@ -69,14 +70,13 @@ private:
 
 	FParityTcpLink TcpLink;
 	bool bConnected = false;
-	int32 TimeoutMs = 120000;
-	int32 TimeoutCount = 0;
+	int32 TimeoutMs = 10000;
 
 	FParityRetargetCache RetargetCache;
-	float WorstDriveReadbackDegrees = 0.0f;
 	bool bSimulationStarted = false;
 
 	bool bLoopReady = false;
+	int32 NotReadyTicks = 0;
 
 	bool bHoldStarted = false;
 	bool bReleased = false;

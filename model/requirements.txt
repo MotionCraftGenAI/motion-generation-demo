@@ -1,3 +1,4 @@
 # CPU is plenty for this policy: a few milliseconds per step.
 torch>=2.6
+# Not imported directly; without it torch warns "Failed to initialize NumPy" on start.
 numpy

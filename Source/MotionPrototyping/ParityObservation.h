@@ -39,7 +39,6 @@ bool ParitySerializeObservation(
 bool ParityParseActionMessage(
 	const FString& Json,
 	int64& OutStep,
-	int64& OutTimestampNs,
 	TArray<double>& OutDofTargets,
 	FString& OutError);
 

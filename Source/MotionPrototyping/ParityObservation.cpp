@@ -158,21 +158,19 @@ bool ParitySerializeObservation(
 
 	TStringBuilder<8192> Builder;
 
-	Builder << TEXT("{\"timestamp\":");
-	Builder.Appendf(TEXT("%.6f"),
-		(FDateTime::UtcNow() - FDateTime(1970, 1, 1)).GetTotalSeconds());
-	Builder << TEXT(",\"step\":") << Step;
-	Builder << TEXT(",\"env_ids\":[0],\"observations\":[[");
+	Builder << TEXT("{\"step\":") << Step;
+	Builder << TEXT(",\"observations\":[[");
 	for (int32 Index = 0; Index < Observation.Num(); ++Index)
 	{
 		if (Index > 0)
 		{
 			Builder << TEXT(",");
 		}
-		// The model reads float32, so seven significant digits lose nothing.
+		// Seven significant digits, as in the reference run the model was verified against
+		// (an exact float32 round trip would need nine).
 		Builder.Appendf(TEXT("%.7g"), Observation[Index]);
 	}
-	Builder << TEXT("]],\"amp_obs\":[[]],\"dones\":[false]}");
+	Builder << TEXT("]]}");
 	OutJson = Builder.ToString();
 	return true;
 }
@@ -191,7 +189,6 @@ void ParityActionsToDofTargets(const TArray<double>& Actions, TArray<double>& Ou
 bool ParityParseActionMessage(
 	const FString& Json,
 	int64& OutStep,
-	int64& OutTimestampNs,
 	TArray<double>& OutDofTargets,
 	FString& OutError)
 {
@@ -239,16 +236,6 @@ bool ParityParseActionMessage(
 	else
 	{
 		OutStep = -1;
-	}
-
-	double Timestamp = 0.0;
-	if (Object->TryGetNumberField(TEXT("timestamp"), Timestamp) && Timestamp > 0.0)
-	{
-		OutTimestampNs = static_cast<int64>(Timestamp * 1.0e9);
-	}
-	else
-	{
-		OutTimestampNs = OutStep;
 	}
 	return true;
 }

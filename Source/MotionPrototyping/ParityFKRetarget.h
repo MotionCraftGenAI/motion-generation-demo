@@ -11,8 +11,6 @@ MOTIONPROTOTYPING_API bool ParityForwardKinematics(
 	TArray<FQuat>& OutRootRelative);
 
 // Conversions from UE (cm, left-handed) to the model's frame (m, right-handed).
-MOTIONPROTOTYPING_API FVector ParityUePositionToIsaac(const FVector& UePositionCm);
-
 FQuat ParityUeRotationToIsaac(const FQuat& UeRotation);
 
 FVector ParityUeWorldPositionToIsaac(const FVector& UePositionCm);
@@ -20,8 +18,6 @@ FVector ParityUeWorldPositionToIsaac(const FVector& UePositionCm);
 FVector ParityUeWorldAxialToIsaac(const FVector& UeAxial);
 
 MOTIONPROTOTYPING_API FName ParityRootBoneName();
-
-bool ParityIsNeckDriven();
 
 struct FParityConstraintBind
 {
@@ -45,13 +41,10 @@ MOTIONPROTOTYPING_API bool ParityApplyDriveTargets(
 	USkeletalMeshComponent* Mesh,
 	const TArray<FQuat>& RootRelative,
 	FParityRetargetCache& Cache,
-	float& OutWorstReadbackDegrees,
 	FString& OutError);
 
 // Reads the 15 model bodies off the simulated avatar.
 MOTIONPROTOTYPING_API bool ParityCapturePhysicsState(
 	USkeletalMeshComponent* Mesh,
-	int64 FrameId,
-	int64 TimestampNs,
 	FParityPhysicsState& OutState,
 	FString& OutError);

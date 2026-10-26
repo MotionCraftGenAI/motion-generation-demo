@@ -33,11 +33,21 @@ local socket. No GPU required.
 | GPU | Not needed: the model runs on the CPU in a few milliseconds per step |
 | OS | Windows 11 *(only tested platform)* |
 
+### Get the project
+
+The Unreal assets are stored with [Git LFS](https://git-lfs.com/), so clone with it installed
+(a "Download ZIP" from GitHub does not include them):
+
+```powershell
+git lfs install
+git clone https://github.com/MotionCraftGenAI/motion-generation-demo.git
+```
+
 ### Set up the model (once)
 
 From the project root:
 
-```bash
+```powershell
 python -m venv .venv
 .venv\Scripts\python -m pip install -r model/requirements.txt
 ```
@@ -46,7 +56,7 @@ python -m venv .venv
 
 1. Start the model and leave it running:
 
-   ```bash
+   ```powershell
    .venv\Scripts\python model/server.py
    ```
 
@@ -70,6 +80,7 @@ with Ctrl+C.
 |---|---|
 | `Motion model not reachable` on screen | The server is not running. Start it (step 1), then press Play again. |
 | `Cannot listen on 127.0.0.1:41911` from the server | Another server is already running (reuse it), or the port is taken. Pick another with `--port`, and set the same address in `ModelAddress` on the character's *Parity Animation Component*, or launch Unreal with `-MotionModel=127.0.0.1:<port>`. |
+| `Motion model timed out` on screen | The model did not answer within `ModelTimeoutSeconds` (10 s). Check the server window for an error, then press Play again. |
 | The character moves in slow motion | The game waits for the model every physics step, so a busy CPU slows the game down rather than making the motion wrong. Close other heavy programs. |
 
 ---

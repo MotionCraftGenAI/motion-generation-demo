@@ -8,15 +8,8 @@ struct FParityBodyState
 	double Values[13] = {};
 };
 
+// The model's 15 bodies in the world frame and the model's axes; the observation is built from it.
 struct FParityPhysicsState
 {
-	int64 FrameId = -1;
-	int64 TimestampNs = -1;
-	double RootPositionM[3] = {};
-	double RootWorldPositionM[3] = {};
-
-	// World frame, absolute rotations: what the observation is built from.
 	TArray<FParityBodyState> BodiesWorld;
-	// Actor frame, root-relative rotations.
-	TArray<FParityBodyState> Bodies;
 };

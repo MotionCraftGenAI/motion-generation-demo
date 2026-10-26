@@ -62,24 +62,18 @@ def serve_session(conn: socket.socket, policy: MotionPolicy) -> int:
             message = recv_message(conn)
             if message is None:
                 break
-            if "observations" not in message:
-                continue
             obs = torch.tensor(message["observations"], dtype=torch.float32, device=policy.device)
-            if obs.shape[-1] != OBS_SIZE:
-                raise ValueError("observation has %d values, the policy expects %d"
-                                 % (obs.shape[-1], OBS_SIZE))
+            if obs.dim() != 2 or obs.shape[-1] != OBS_SIZE:
+                raise ValueError("observations have shape %s, expected (N, %d)"
+                                 % (tuple(obs.shape), OBS_SIZE))
             actions = policy.act(obs)
-            send_message(conn, {
-                "timestamp": time.time(),
-                "step": message["step"],
-                "env_ids": message.get("env_ids", [0]),
-                "actions": actions.cpu().tolist(),
-            })
+            send_message(conn, {"step": message["step"], "actions": actions.cpu().tolist()})
             served += 1
     except ConnectionError:
         pass  # Unreal closed without stopping Play first
-    except ValueError as error:
-        print("Session ended: %s" % error, flush=True)
+    except Exception as error:
+        # A bad message ends this session only; the server waits for the next Play.
+        print("Session ended: %s: %s" % (type(error).__name__, error), flush=True)
     return served
 
 

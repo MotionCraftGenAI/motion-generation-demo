@@ -38,7 +38,7 @@ namespace
 		TEXT("spine_02"), TEXT("spine_03"), TEXT("spine_05"),
 		TEXT("clavicle_l"), TEXT("clavicle_r"),
 		TEXT("hand_l"), TEXT("hand_r"),
-		TEXT("neck_01"), TEXT("neck_02"), TEXT("head")
+		TEXT("neck_01"), TEXT("neck_02")
 	};
 
 	FQuat ConstraintFrameRelativeRotation(const FConstraintInstance& Constraint)
@@ -99,7 +99,7 @@ bool UPhysicalAnimation::ConnectToModel()
 		UE_LOG(LogPhysicalAnimation, Error,
 			TEXT("[Model] cannot reach the motion model at %s: %s"), *Address, *Error);
 		ShowStatus(FString::Printf(
-			TEXT("Motion model not reachable at %s. Start it with: python model/server.py, ")
+			TEXT("Motion model not reachable at %s. Start it with: .venv\\Scripts\\python model/server.py, ")
 			TEXT("then press Play again."), *Address), FColor::Red);
 		return false;
 	}
@@ -107,6 +107,14 @@ bool UPhysicalAnimation::ConnectToModel()
 	UE_LOG(LogPhysicalAnimation, Display,
 		TEXT("[Model] connected to %s; observation out, action in, lockstep"), *Address);
 	return true;
+}
+
+void UPhysicalAnimation::Disconnect(const FString& Reason)
+{
+	TcpLink.Close();
+	bConnected = false;
+	UE_LOG(LogPhysicalAnimation, Warning, TEXT("[Model] %s Nothing drives the avatar now."), *Reason);
+	ShowStatus(Reason, FColor::Yellow);
 }
 
 void UPhysicalAnimation::TickComponent(
@@ -129,8 +137,14 @@ void UPhysicalAnimation::TickModelLoop()
 	// No physics before observation 0 can be sent, so tick N always answers observation N.
 	if (!bLoopReady)
 	{
-		if (!CanPublishObservation())
+		FString Error;
+		if (!CanPublishObservation(Error))
 		{
+			if (++NotReadyTicks == 30)
+			{
+				UE_LOG(LogPhysicalAnimation, Error, TEXT("[Model] cannot start: %s"), *Error);
+				ShowStatus(FString::Printf(TEXT("Motion model cannot start: %s"), *Error), FColor::Red);
+			}
 			return;
 		}
 		bLoopReady = true;
@@ -158,33 +172,29 @@ void UPhysicalAnimation::TickModelLoop()
 	bPublishedThisTick = PublishObservation();
 
 	TArray<double> DofTargets;
-	if (bConnected)
+	if (bConnected && bPublishedThisTick)
 	{
 		FString Reply;
-		if (TcpLink.Recv(Reply, TimeoutMs))
+		if (!TcpLink.Recv(Reply, TimeoutMs))
 		{
-			TimeoutCount = 0;
-			int64 Step = -1;
-			int64 TimestampNs = -1;
-			FString Error;
-			if (!ParityParseActionMessage(Reply, Step, TimestampNs, DofTargets, Error))
-			{
-				UE_LOG(LogPhysicalAnimation, Error, TEXT("[Model] bad action message: %s"), *Error);
-			}
+			// A late answer would be applied to the wrong step from then on, so a timeout is fatal.
+			Disconnect(TcpLink.IsConnected()
+				? FString::Printf(TEXT("Motion model timed out (no answer within %d ms)."), TimeoutMs)
+				: FString(TEXT("Motion model disconnected.")));
+			return;
 		}
-		else if (!TcpLink.IsConnected())
+		int64 Step = -1;
+		FString Error;
+		if (!ParityParseActionMessage(Reply, Step, DofTargets, Error))
 		{
-			UE_LOG(LogPhysicalAnimation, Display,
-				TEXT("[Model] the model server closed the connection; nothing drives the avatar now"));
-			ShowStatus(TEXT("Motion model disconnected."), FColor::Yellow);
-			bConnected = false;
+			Disconnect(FString::Printf(TEXT("Bad message from the motion model: %s"), *Error));
+			return;
 		}
-		else if (++TimeoutCount <= 5 || (TimeoutCount % 100) == 0)
+		if (Step != ObservationStep - 1)
 		{
-			UE_LOG(LogPhysicalAnimation, Warning,
-				TEXT("[Model] no action within %d ms (%d times). Physics stepped without a ")
-				TEXT("command, so the rest of this run answers stale states."),
-				TimeoutMs, TimeoutCount);
+			Disconnect(FString::Printf(
+				TEXT("Motion model answered step %lld, expected %lld."), Step, ObservationStep - 1));
+			return;
 		}
 	}
 
@@ -219,7 +229,7 @@ void UPhysicalAnimation::TickModelLoop()
 	}
 	FString Error;
 	if (!ParityApplyDriveTargets(
-		SkeletalMesh, RootRelative, RetargetCache, WorstDriveReadbackDegrees, Error))
+		SkeletalMesh, RootRelative, RetargetCache, Error))
 	{
 		UE_LOG(LogPhysicalAnimation, Verbose, TEXT("[Model] deferring drive install: %s"), *Error);
 	}
@@ -286,23 +296,18 @@ void UPhysicalAnimation::TickHold()
 	}
 }
 
-bool UPhysicalAnimation::CanPublishObservation() const
+bool UPhysicalAnimation::CanPublishObservation(FString& OutError) const
 {
 	FParityPhysicsState Probe;
-	FString ProbeError;
-	if (!ParityCapturePhysicsState(SkeletalMesh, 0, 1, Probe, ProbeError))
-	{
-		return false;
-	}
-	return Probe.BodiesWorld.Num() == ParityObsBodyCount;
+	return ParityCapturePhysicsState(SkeletalMesh, Probe, OutError)
+		&& Probe.BodiesWorld.Num() == ParityObsBodyCount;
 }
 
 bool UPhysicalAnimation::PublishObservation()
 {
 	FParityPhysicsState State;
 	FString Error;
-	if (!ParityCapturePhysicsState(
-		SkeletalMesh, ObservationStep, ObservationStep + 1, State, Error))
+	if (!ParityCapturePhysicsState(SkeletalMesh, State, Error))
 	{
 		UE_LOG(LogPhysicalAnimation, Warning, TEXT("[Model] state capture failed: %s"), *Error);
 		return false;
@@ -363,6 +368,14 @@ bool UPhysicalAnimation::PublishObservation()
 		UE_LOG(LogPhysicalAnimation, Warning, TEXT("[Model] observation build failed: %s"), *Error);
 		return false;
 	}
+	for (const double Value : Observation)
+	{
+		if (!FMath::IsFinite(Value))
+		{
+			Disconnect(TEXT("The simulation diverged (non-finite observation)."));
+			return false;
+		}
+	}
 	FString Json;
 	if (!ParitySerializeObservation(ObservationStep, Observation, Json, Error))
 	{
@@ -371,11 +384,8 @@ bool UPhysicalAnimation::PublishObservation()
 	}
 	if (!TcpLink.Send(Json))
 	{
-		UE_LOG(LogPhysicalAnimation, Display,
-			TEXT("[Model] the model server closed the connection at step %lld; nothing drives ")
-			TEXT("the avatar now"), ObservationStep);
-		ShowStatus(TEXT("Motion model disconnected."), FColor::Yellow);
-		bConnected = false;
+		Disconnect(TEXT("Motion model disconnected."));
+		return false;
 	}
 	++ObservationStep;
 	return true;
@@ -395,10 +405,6 @@ void UPhysicalAnimation::EnsureSimulationStarted()
 	int32 Welded = 0;
 	for (const TCHAR* BoneName : WeldedBones)
 	{
-		if (ParityIsNeckDriven() && FCString::Strcmp(BoneName, TEXT("head")) == 0)
-		{
-			continue;
-		}
 		FConstraintInstance* Constraint = SkeletalMesh->FindConstraintInstance(FName(BoneName));
 		if (!Constraint)
 		{
