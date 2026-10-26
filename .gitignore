@@ -81,3 +81,7 @@ Config/DefaultEditorPerProjectUserSettings.ini
 
 # Ignore all .log files
 *.log
+
+# Python
+__pycache__/
+.venv/

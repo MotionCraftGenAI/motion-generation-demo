@@ -1,0 +1,3 @@
+# CPU is plenty for this policy: a few milliseconds per step.
+torch>=2.6
+numpy
